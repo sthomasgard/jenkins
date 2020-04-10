@@ -699,30 +699,14 @@ public abstract class AbstractItem extends Actionable implements Item, HttpDelet
         try {
             // if a build is in progress. Cancel it.
             if (responsibleForAbortingBuilds || ownsRegistration) {
-                Queue queue = Queue.getInstance();
-                if (this instanceof Queue.Task) {
-                    // clear any items in the queue so they do not get picked up
-                    queue.cancel((Queue.Task) this);
-                }
-                // now cancel any child items - this happens after ItemDeletion registration, so we can use a snapshot
-                for (Queue.Item i : queue.getItems()) {
-                    Item item = Tasks.getItemOf(i.task);
-                    while (item != null) {
-                        if (item == this) {
-                            queue.cancel(i);
-                            break;
-                        }
-                        if (item.getParent() instanceof Item) {
-                            item = (Item) item.getParent();
-                        } else {
-                            break;
-                        }
-                    }
-                }
+
+                cancelItems(); //cancels items in queue and children
+
                 // interrupt any builds in progress (and this should be a recursive test so that folders do not pay
                 // the 15 second delay for every child item). This happens after queue cancellation, so will be
                 // a complete set of builds in flight
                 Map<Executor, Queue.Executable> buildsInProgress = new LinkedHashMap<>();
+
                 for (Computer c : Jenkins.get().getComputers()) {
                     for (Executor e : c.getAllExecutors()) {
                         final WorkUnit workUnit = e.getCurrentWorkUnit();
@@ -731,21 +715,15 @@ public abstract class AbstractItem extends Actionable implements Item, HttpDelet
                                 
                         if (subtask != null) {        
                             Item item = Tasks.getItemOf(subtask);
-                            while (item != null) {
-                                if (item == this) {
-                                    buildsInProgress.put(e, e.getCurrentExecutable());
-                                    e.interrupt(Result.ABORTED);
-                                    break;
-                                }
-                                if (item.getParent() instanceof Item) {
-                                    item = (Item) item.getParent();
-                                } else {
-                                    break;
-                                }
+                            Item foundItem = getItem(item);
+                            if (foundItem != null) {
+                                buildsInProgress.put(e, e.getCurrentExecutable());
+                                e.interrupt(Result.ABORTED);
                             }
                         }
                     }
                 }
+
                 if (!buildsInProgress.isEmpty()) {
                     // give them 15 seconds or so to respond to the interrupt
                     long expiration = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
@@ -763,8 +741,11 @@ public abstract class AbstractItem extends Actionable implements Item, HttpDelet
                             // comparison with executor.getCurrentExecutable() == executable currently should always be
                             // true as we no longer recycle Executors, but safer to future-proof in case we ever
                             // revisit recycling.
-                            if (!entry.getKey().isAlive()
-                                    || entry.getValue() != entry.getKey().getCurrentExecutable()) {
+
+                            boolean isDead = !entry.getKey().isAlive();
+                            boolean isCurrentExecutable = entry.getValue() == entry.getKey().getCurrentExecutable() ? true : false;
+
+                            if (isDead || !isCurrentExecutable) {
                                 iterator.remove();
                             }
                             // I don't know why, but we have to keep interrupting
@@ -789,6 +770,43 @@ public abstract class AbstractItem extends Actionable implements Item, HttpDelet
         }
         getParent().onDeleted(AbstractItem.this);
         Jenkins.get().rebuildDependencyGraphAsync();
+    }
+
+    /*
+    Finds the current instance of item
+    */
+    protected Item getItem(Item item) {
+        while (item != null) {
+            if (item == this) {
+                return item;
+            }
+            if (item.getParent() instanceof Item) {
+                item = (Item) item.getParent();
+            } else {
+                break;
+            }
+        }
+        return null;
+    }
+
+    /*
+    Cancels items when deleting items
+    */
+
+    protected void cancelItems() {
+        Queue queue = Queue.getInstance();
+        if (this instanceof Queue.Task) {
+            // clear any items in the queue so they do not get picked up
+            queue.cancel((Queue.Task) this);
+        }
+        // now cancel any child items - this happens after ItemDeletion registration, so we can use a snapshot
+        for (Queue.Item i : queue.getItems()) {
+            Item item = Tasks.getItemOf(i.task);
+            Item foundItem = getItem(item);
+            if (foundItem != null) {
+                queue.cancel(i);
+            }
+        }
     }
 
     /**
