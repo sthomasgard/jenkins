@@ -699,30 +699,13 @@ public abstract class AbstractItem extends Actionable implements Item, HttpDelet
         try {
             // if a build is in progress. Cancel it.
             if (responsibleForAbortingBuilds || ownsRegistration) {
-                Queue queue = Queue.getInstance();
-                if (this instanceof Queue.Task) {
-                    // clear any items in the queue so they do not get picked up
-                    queue.cancel((Queue.Task) this);
-                }
-                // now cancel any child items - this happens after ItemDeletion registration, so we can use a snapshot
-                for (Queue.Item i : queue.getItems()) {
-                    Item item = Tasks.getItemOf(i.task);
-                    while (item != null) {
-                        if (item == this) {
-                            queue.cancel(i);
-                            break;
-                        }
-                        if (item.getParent() instanceof Item) {
-                            item = (Item) item.getParent();
-                        } else {
-                            break;
-                        }
-                    }
-                }
+                cancelItems(); //cancels items in queue and children
+
                 // interrupt any builds in progress (and this should be a recursive test so that folders do not pay
                 // the 15 second delay for every child item). This happens after queue cancellation, so will be
                 // a complete set of builds in flight
                 Map<Executor, Queue.Executable> buildsInProgress = new LinkedHashMap<>();
+
                 for (Computer c : Jenkins.get().getComputers()) {
                     for (Executor e : c.getAllExecutors()) {
                         final WorkUnit workUnit = e.getCurrentWorkUnit();
@@ -731,17 +714,10 @@ public abstract class AbstractItem extends Actionable implements Item, HttpDelet
                                 
                         if (subtask != null) {        
                             Item item = Tasks.getItemOf(subtask);
-                            while (item != null) {
-                                if (item == this) {
-                                    buildsInProgress.put(e, e.getCurrentExecutable());
-                                    e.interrupt(Result.ABORTED);
-                                    break;
-                                }
-                                if (item.getParent() instanceof Item) {
-                                    item = (Item) item.getParent();
-                                } else {
-                                    break;
-                                }
+                            Item foundItem = findItem(item);
+                            if (foundItem != null) {
+                                buildsInProgress.put(e, e.getCurrentExecutable());
+                                e.interrupt(Result.ABORTED);
                             }
                         }
                     }
@@ -790,6 +766,43 @@ public abstract class AbstractItem extends Actionable implements Item, HttpDelet
         getParent().onDeleted(AbstractItem.this);
         Jenkins.get().rebuildDependencyGraphAsync();
     }
+
+    protected Item findItem(Item item) {
+        while (item != null) {
+            if (item == this) {
+                return item;
+                //break;
+            }
+            if (item.getParent() instanceof Item) {
+                item = (Item) item.getParent();
+            } else {
+                //return null;
+                break;
+            }
+        }
+        return null;
+    }
+
+    protected void cancelItems() {
+        Queue queue = Queue.getInstance();
+        if (this instanceof Queue.Task) {
+            // clear any items in the queue so they do not get picked up
+            queue.cancel((Queue.Task) this);
+        }
+        // now cancel any child items - this happens after ItemDeletion registration, so we can use a snapshot
+        clearChild(queue);
+    }
+
+    protected void clearChild(Queue queue) {
+        for (Queue.Item i : queue.getItems()) {
+            Item item = Tasks.getItemOf(i.task);
+            Item foundItem = findItem(item);
+            if (foundItem != null) {
+                queue.cancel(i);
+            }
+        }
+    }
+
 
     /**
      * Does the real job of deleting the item.
